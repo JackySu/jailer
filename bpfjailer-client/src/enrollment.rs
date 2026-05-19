@@ -25,6 +25,8 @@ pub enum EnrollmentRequest {
     /// sending SIGHUP). Allows unprivileged users to trigger reload via socket
     /// instead of needing kill permissions on the daemon process.
     Reload,
+    /// Query daemon status: attached state, loaded policy summary.
+    Status,
     // Alternative enrollment management
     EnrollExecutable {
         executable_path: String,
@@ -70,6 +72,15 @@ pub enum EnrollmentResponse {
     /// Response to EnrollSelf — tells the caller which cgroup it was placed in.
     Enrolled {
         cgroup: String,
+    },
+    /// Response to Status — daemon state summary.
+    StatusInfo {
+        attached: bool,
+        lsm_hooks: usize,
+        roles: Vec<String>,
+        cgroup_enrollments: usize,
+        exec_enrollments: usize,
+        policy_path: String,
     },
 }
 

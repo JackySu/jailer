@@ -1,14 +1,20 @@
 use anyhow::Result;
-use bpfjailer_common::{PolicyConfig, PolicyFlags, PodId, Role, RoleId};
+use bpfjailer_common::{PathPattern, PolicyConfig, PolicyFlags, PodId, Role, RoleId};
 use log::info;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 
+use crate::user_extensions;
+
+const DROP_IN_DIR: &str = "/etc/bpfjailer/policy.d";
+
 pub struct PolicyManager {
     config: PolicyConfig,
     role_map: HashMap<RoleId, Arc<Role>>,
+    loaded_path: String,
+    extensions: HashMap<u32, Vec<PathPattern>>,
 }
 
 impl PolicyManager {
@@ -75,13 +81,20 @@ impl PolicyManager {
         Ok(Self {
             config,
             role_map,
+            loaded_path: "(defaults)".to_string(),
+            extensions: HashMap::new(),
         })
     }
 
     pub async fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
-        info!("Loading policy from {:?}", path.as_ref());
-        let content = fs::read_to_string(path).await?;
+        let path_ref = path.as_ref();
+        info!("Loading policy from {:?}", path_ref);
+        self.loaded_path = path_ref.display().to_string();
+        let content = fs::read_to_string(path_ref).await?;
         self.config = serde_json::from_str(&content)?;
+
+        // Merge drop-in fragments from /etc/bpfjailer/policy.d/*.json
+        self.load_drop_ins().await;
 
         self.role_map.clear();
         for (_name, role) in &self.config.roles {
@@ -90,6 +103,47 @@ impl PolicyManager {
 
         info!("Loaded {} roles", self.role_map.len());
         Ok(())
+    }
+
+    /// Load drop-in policy fragments from /etc/bpfjailer/policy.d/*.json
+    /// Merged in alphabetical order; later files override earlier ones.
+    async fn load_drop_ins(&mut self) {
+        let dir = Path::new(DROP_IN_DIR);
+        if !dir.is_dir() {
+            return;
+        }
+
+        let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
+                .collect(),
+            Err(e) => {
+                log::warn!("Cannot read {}: {}", DROP_IN_DIR, e);
+                return;
+            }
+        };
+        entries.sort();
+
+        for path in &entries {
+            match fs::read_to_string(path).await {
+                Ok(content) => match serde_json::from_str::<PolicyConfig>(&content) {
+                    Ok(fragment) => {
+                        let count = fragment.roles.len();
+                        for (name, role) in fragment.roles {
+                            self.config.roles.insert(name, role);
+                        }
+                        self.config.exec_enrollments.extend(fragment.exec_enrollments);
+                        self.config.cgroup_enrollments.extend(fragment.cgroup_enrollments);
+                        self.config.pods.extend(fragment.pods);
+                        info!("Merged drop-in {:?} ({} roles)", path.file_name().unwrap_or_default(), count);
+                    }
+                    Err(e) => log::warn!("Invalid JSON in {:?}: {}", path, e),
+                },
+                Err(e) => log::warn!("Cannot read {:?}: {}", path, e),
+            }
+        }
     }
 
     pub fn get_role(&self, role_id: RoleId) -> Option<&Arc<Role>> {
@@ -125,5 +179,57 @@ impl PolicyManager {
                     .map(|r| (e.cgroup_path.clone(), PodId(e.pod_id), r.id))
             })
             .collect()
+    }
+
+    pub fn role_names(&self) -> Vec<String> {
+        self.config.roles.keys().cloned().collect()
+    }
+
+    pub fn cgroup_enrollment_count(&self) -> usize {
+        self.config.cgroup_enrollments.len()
+    }
+
+    pub fn exec_enrollment_count(&self) -> usize {
+        self.config.exec_enrollments.len()
+    }
+
+    pub fn policy_path(&self) -> &str {
+        &self.loaded_path
+    }
+
+    /// Load user extensions from ~/.config/bpfjailer/policy.json for all users.
+    /// Returns error messages for configs that failed validation.
+    pub fn load_user_extensions(&mut self) -> Vec<String> {
+        let (exts, errors) = user_extensions::load_all(&self.config.roles);
+        let count = exts.len();
+        self.extensions = exts;
+        if count > 0 {
+            info!("Loaded user extensions for {} user(s)", count);
+        }
+        errors
+    }
+
+    /// Get effective file_paths for a role, including user extensions if uid is provided.
+    pub fn effective_file_paths(&self, role_id: RoleId, uid: Option<u32>) -> Vec<PathPattern> {
+        let mut paths = match self.role_map.get(&role_id) {
+            Some(role) => role.file_paths.clone(),
+            None => return Vec::new(),
+        };
+        if let Some(uid) = uid {
+            if let Some(user_exts) = self.extensions.get(&uid) {
+                paths.extend(user_exts.iter().cloned());
+            }
+        }
+        paths
+    }
+
+    /// Get user extensions for a specific uid.
+    #[allow(dead_code)]
+    pub fn get_user_extensions(&self, uid: u32) -> Option<&Vec<PathPattern>> {
+        self.extensions.get(&uid)
+    }
+
+    pub fn extensions_count(&self) -> usize {
+        self.extensions.len()
     }
 }

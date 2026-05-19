@@ -6,6 +6,10 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/sbin/bpfjailer-daemon
+# `systemctl reload bpfjailer-daemon` sends SIGHUP. The daemon re-evaluates
+# the emergency-disable sentinel (/etc/bpfjailer/disabled) and attaches or
+# detaches LSM hooks accordingly without restarting the process.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

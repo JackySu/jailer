@@ -25,6 +25,7 @@ services:
   # BpfJailer daemon - runs with elevated privileges to load BPF programs
   bpfjailer:
     build:
+      network: host
       context: ../..
       dockerfile: examples/docker/Dockerfile.bpfjailer
     container_name: bpfjailer

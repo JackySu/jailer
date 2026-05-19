@@ -334,8 +334,8 @@ static __always_inline u32 hash_component(const unsigned char *name, u32 len)
 // BTRFS subvolume layouts where e.g. /etc lives in @ (subvol=/@) and /home in
 // @home (subvol=/@home) — the dentry chain inside each subvolume terminates
 // at its own subvolume root long before reaching the /-mount visible to
-// userspace. Without this crossing, /home/sushi/.ssh would only see
-// ["sushi", ".ssh"] and miss the "home" component the policy was written for.
+// userspace. Without this crossing, paths would be truncated and miss
+// components the policy was written for.
 static __always_inline int collect_path_components(struct file *file,
                                                     struct path_components *buf)
 {

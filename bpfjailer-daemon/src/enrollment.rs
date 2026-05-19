@@ -138,7 +138,8 @@ impl EnrollmentServer {
             .context("Failed to get peer credentials")?;
 
         let pid = peer_creds.pid().unwrap_or(0);
-        debug!("Handling enrollment request from PID {}", pid);
+        let uid = peer_creds.uid();
+        debug!("Handling enrollment request from PID {} uid {}", pid, uid);
 
         let mut reader = BufReader::new(&mut stream);
         let mut line = String::new();
@@ -149,10 +150,13 @@ impl EnrollmentServer {
 
         let response = match request {
             EnrollmentRequest::EnrollSelf { role } => {
-                Self::handle_enroll_self(pid, &role, &process_tracker, &policy_manager).await
+                Self::handle_enroll_self(pid, uid, &role, &process_tracker, &policy_manager).await
             }
             EnrollmentRequest::Reload => {
                 Self::handle_reload(&bpf)
+            }
+            EnrollmentRequest::Status => {
+                Self::handle_status(&bpf, &policy_manager).await
             }
             EnrollmentRequest::Enroll { pod_id, role_id } => {
                 debug!("Enrollment request: PID {} -> Pod {} Role {}", pid, pod_id.0, role_id.0);
@@ -263,6 +267,7 @@ impl EnrollmentServer {
     /// Handle EnrollSelf: daemon writes caller's PID into the jailer cgroup.
     async fn handle_enroll_self(
         pid: i32,
+        uid: u32,
         role_name: &str,
         process_tracker: &Arc<ProcessTracker>,
         policy_manager: &Arc<RwLock<PolicyManager>>,
@@ -278,6 +283,7 @@ impl EnrollmentServer {
                 return EnrollmentResponse::Error(format!("unknown role: {}", role_name));
             }
         };
+        let user_ext_paths = pm.effective_file_paths(role_arc.id, Some(uid));
         drop(pm);
 
         let role_id = role_arc.id;
@@ -299,7 +305,7 @@ impl EnrollmentServer {
             ));
         }
 
-        info!("EnrollSelf: PID {} -> cgroup {} role {}", pid, cgroup_dir, role_name);
+        info!("EnrollSelf: PID {} uid {} -> cgroup {} role {}", pid, uid, cgroup_dir, role_name);
 
         // Set role policy and apply rules
         if let Err(e) = process_tracker.set_role_policy(role_id, &role_arc.flags) {
@@ -308,7 +314,8 @@ impl EnrollmentServer {
         if let Err(e) = process_tracker.apply_network_rules(role_id, &role_arc.network_rules) {
             error!("Failed to apply network rules for EnrollSelf: {}", e);
         }
-        if let Err(e) = process_tracker.apply_path_rules(role_id, &role_arc.file_paths) {
+        // Apply effective file_paths (base + user extensions)
+        if let Err(e) = process_tracker.apply_path_rules(role_id, &user_ext_paths) {
             error!("Failed to apply path rules for EnrollSelf: {}", e);
         }
 
@@ -320,28 +327,36 @@ impl EnrollmentServer {
         }
     }
 
-    /// Handle Reload: re-evaluate the disable sentinel.
-    fn handle_reload(bpf: &Arc<BpfJailerBpf>) -> EnrollmentResponse {
-        let sentinel = Path::new("/etc/bpfjailer/disabled");
-        let now_disabled = sentinel.exists();
-        let was_attached = bpf.is_attached();
+    /// Handle Reload: send SIGHUP to self to trigger full policy hot-reload.
+    fn handle_reload(_bpf: &Arc<BpfJailerBpf>) -> EnrollmentResponse {
+        info!("Reload requested via socket, raising SIGHUP");
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGHUP);
+        }
+        EnrollmentResponse::Success
+    }
 
-        info!("Reload via socket (disabled={}, was_attached={})", now_disabled, was_attached);
+    /// Handle Status: report daemon state summary.
+    async fn handle_status(
+        bpf: &Arc<BpfJailerBpf>,
+        policy_manager: &Arc<RwLock<PolicyManager>>,
+    ) -> EnrollmentResponse {
+        let attached = bpf.is_attached();
+        let lsm_hooks = bpf.attached_count();
+        let pm = policy_manager.read().await;
+        let roles: Vec<String> = pm.role_names();
+        let cgroup_enrollments = pm.cgroup_enrollment_count();
+        let exec_enrollments = pm.exec_enrollment_count();
+        let policy_path = pm.policy_path().to_string();
+        drop(pm);
 
-        match (was_attached, now_disabled) {
-            (true, true) => {
-                warn!("Disable sentinel appeared, detaching LSM programs");
-                bpf.detach_lsm_programs();
-                EnrollmentResponse::Success
-            }
-            (false, false) => {
-                info!("Disable sentinel removed, re-attaching LSM programs");
-                match bpf.attach_lsm_programs() {
-                    Ok(()) => EnrollmentResponse::Success,
-                    Err(e) => EnrollmentResponse::Error(format!("re-attach failed: {}", e)),
-                }
-            }
-            _ => EnrollmentResponse::Success,
+        EnrollmentResponse::StatusInfo {
+            attached,
+            lsm_hooks,
+            roles,
+            cgroup_enrollments,
+            exec_enrollments,
+            policy_path,
         }
     }
 }

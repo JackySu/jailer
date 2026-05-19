@@ -3,8 +3,10 @@ mod process_tracker;
 mod policy;
 mod enrollment;
 mod enrollment_alternatives;
+mod audit;
 mod path_matcher;
 mod signed_binary;
+mod user_extensions;
 
 use anyhow::Result;
 use log::{error, info, warn};
@@ -60,6 +62,9 @@ async fn main() -> Result<()> {
         bpf.attach_lsm_programs()?;
     }
 
+    // Start audit perf buffer reader thread
+    audit::start_audit_thread(bpf.clone());
+
     // Initialize policy manager with default roles
     let mut policy_manager = policy::PolicyManager::new()?;
 
@@ -83,6 +88,12 @@ async fn main() -> Result<()> {
         }
     } else {
         info!("No policy file found, using default roles");
+    }
+
+    // Load per-user extensions from ~/.config/bpfjailer/policy.json
+    let ext_errors = policy_manager.load_user_extensions();
+    for e in &ext_errors {
+        error!("user_extension: {}", e);
     }
 
     let policy_manager = Arc::new(RwLock::new(policy_manager));
@@ -175,6 +186,8 @@ async fn main() -> Result<()> {
                 let now_disabled = is_disabled();
                 let was_attached = bpf.is_attached();
                 info!("SIGHUP received (disabled={}, was_attached={})", now_disabled, was_attached);
+
+                // Handle attach/detach based on sentinel
                 match (was_attached, now_disabled) {
                     (true, true) => {
                         warn!("Disable sentinel appeared, detaching LSM programs");
@@ -185,13 +198,93 @@ async fn main() -> Result<()> {
                         info!("Disable sentinel removed, re-attaching LSM programs");
                         match bpf.attach_lsm_programs() {
                             Ok(()) => info!("Enforcement resumed"),
-                            Err(e) => error!("Re-attach failed: {} (daemon still running, no enforcement)", e),
+                            Err(e) => error!("Re-attach failed: {}", e),
                         }
                     }
-                    _ => {
-                        info!("No state change required for this SIGHUP");
+                    _ => {}
+                }
+
+                // Hot-reload: re-read global policy + user extensions
+                info!("Reloading policy...");
+                if let Err(e) = bpf.clear_policy_maps() {
+                    error!("Failed to clear BPF maps: {}", e);
+                }
+
+                let mut pm = policy_manager.write().await;
+                let policy_file = env::var("BPFJAILER_POLICY")
+                    .ok()
+                    .or_else(|| {
+                        if Path::new(DEFAULT_POLICY_PATH).exists() {
+                            Some(DEFAULT_POLICY_PATH.to_string())
+                        } else if Path::new(LOCAL_POLICY_PATH).exists() {
+                            Some(LOCAL_POLICY_PATH.to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(path) = policy_file {
+                    match pm.load_from_file(&path).await {
+                        Ok(()) => info!("Policy reloaded from {}", path),
+                        Err(e) => error!("Failed to reload policy: {}", e),
                     }
                 }
+
+                let ext_errors = pm.load_user_extensions();
+                info!("User extensions reloaded: {} uid(s) with active rules", pm.extensions_count());
+                for e in &ext_errors {
+                    error!("user_extension reload: {}", e);
+                }
+
+                // Re-apply all rules from reloaded policy
+                let all_patterns: Vec<String> = pm.config().roles.values()
+                    .flat_map(|role| role.file_paths.iter().map(|p| p.pattern.clone()))
+                    .collect();
+
+                for (_name, role) in pm.config().roles.iter() {
+                    let role_id = role.id;
+                    if let Err(e) = process_tracker.set_role_policy(role_id, &role.flags) {
+                        warn!("reload: set_role_policy {}: {}", role_id.0, e);
+                    }
+                    if let Err(e) = process_tracker.apply_path_rules(role_id, &role.file_paths) {
+                        warn!("reload: apply_path_rules {}: {}", role_id.0, e);
+                    }
+                    if !role.ip_rules.is_empty() {
+                        if let Err(e) = process_tracker.apply_ip_rules(role_id, &role.ip_rules) {
+                            warn!("reload: apply_ip_rules {}: {}", role_id.0, e);
+                        }
+                    }
+                    if !role.domain_rules.is_empty() {
+                        if let Err(e) = process_tracker.apply_domain_rules(role_id, &role.domain_rules) {
+                            warn!("reload: apply_domain_rules {}: {}", role_id.0, e);
+                        }
+                    }
+                    if let Some(ref proxy) = role.proxy {
+                        if let Err(e) = process_tracker.set_proxy_config(role_id, proxy) {
+                            warn!("reload: set_proxy_config {}: {}", role_id.0, e);
+                        }
+                    }
+                }
+                drop(pm);
+
+                if !all_patterns.is_empty() {
+                    if let Err(e) = path_matcher.compile_patterns(&all_patterns) {
+                        warn!("reload: compile_patterns: {}", e);
+                    }
+                }
+
+                // Reload auto-enrollment rules
+                if let Err(e) = alt_enrollment.load_from_policy().await {
+                    warn!("reload: load_from_policy: {}", e);
+                }
+
+                // Invalidate cache again after re-applying rules to discard
+                // any entries cached during the reload window
+                if let Err(e) = bpf.invalidate_cache() {
+                    warn!("reload: invalidate_cache: {}", e);
+                }
+
+                info!("Policy reload complete");
             }
             _ = signal::ctrl_c() => {
                 info!("Shutting down...");

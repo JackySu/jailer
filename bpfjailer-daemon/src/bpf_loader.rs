@@ -14,6 +14,9 @@ const LSM_PROGRAM_NAMES: &[&str] = &[
     "path_rename",
     "sb_mount",
     "sb_umount",
+    "ptrace_access_check",
+    "kernel_module_request",
+    "bpf",
 ];
 
 // Wrapper to make Object Send + Sync
@@ -222,6 +225,33 @@ impl BpfJailerBpf {
     /// Whether LSM enforcement is currently active.
     pub fn is_attached(&self) -> bool {
         !self.links.lock().unwrap().is_empty()
+    }
+
+    /// Number of currently attached LSM hooks.
+    pub fn attached_count(&self) -> usize {
+        self.links.lock().unwrap().len()
+    }
+
+    /// Build a PerfBuffer for the `audit_events` map. The caller owns the
+    /// returned PerfBuffer and is responsible for calling `poll()` on it.
+    /// Must be called from a dedicated thread (PerfBuffer::poll is blocking).
+    pub fn build_audit_perf_buffer<'b, F>(
+        &self,
+        sample_cb: F,
+        pages: usize,
+    ) -> Result<libbpf_rs::PerfBuffer<'b>>
+    where
+        F: FnMut(i32, &[u8]) + 'b,
+    {
+        let object = self.object.lock().unwrap();
+        let map = object
+            .map("audit_events")
+            .ok_or_else(|| anyhow::anyhow!("audit_events map not found in BPF object"))?;
+        let pb = libbpf_rs::PerfBufferBuilder::new(map)
+            .sample_cb(sample_cb)
+            .pages(pages)
+            .build()?;
+        Ok(pb)
     }
 
     pub fn update_pod_role(&self, pod_id: u64, role_id: u32) -> Result<()> {
@@ -742,6 +772,40 @@ impl BpfJailerBpf {
     // =========================================================================
     // Pinning Support for Daemonless Mode
     // =========================================================================
+
+    /// Clear all entries from a named BPF map by iterating keys.
+    fn clear_map(&self, map_name: &str) -> Result<usize> {
+        let object = self.object.lock().unwrap();
+        let map = match object.map(map_name) {
+            Some(m) => m,
+            None => return Ok(0),
+        };
+        let keys: Vec<Vec<u8>> = map.keys().collect();
+        let count = keys.len();
+        for key in &keys {
+            let _ = map.delete(key);
+        }
+        Ok(count)
+    }
+
+    /// Clear all policy-related BPF maps including inode_cache.
+    /// Does NOT touch enrollment maps or task_storage.
+    pub fn clear_policy_maps(&self) -> Result<()> {
+        let maps = [
+            "path_states", "path_rules", "ip_rules",
+            "domain_rules", "network_rules", "proxy_config", "role_flags",
+            "inode_cache",
+        ];
+        for name in &maps {
+            match self.clear_map(name) {
+                Ok(n) if n > 0 => log::info!("Cleared {} entries from {}", n, name),
+                Ok(_) => {}
+                Err(e) => log::warn!("Failed to clear {}: {}", name, e),
+            }
+        }
+        self.invalidate_cache()?;
+        Ok(())
+    }
 
     /// Path where BPF objects are pinned
     pub const BPF_PIN_PATH: &'static str = "/sys/fs/bpf/bpfjailer";

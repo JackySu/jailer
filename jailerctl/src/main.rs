@@ -1,5 +1,8 @@
 mod doctor;
 mod run;
+mod status;
+mod enroll;
+mod audit;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -34,6 +37,32 @@ enum Commands {
         /// Path to the policy file
         path: String,
     },
+    /// Show daemon status (attached state, loaded policy summary)
+    Status,
+    /// Enroll a process into a jailer role
+    Enroll {
+        /// Role name to assign
+        #[arg(long, short, default_value = "code_agent")]
+        role: String,
+        /// PID to enroll (default: self)
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+    /// Show recent audit events from BPF LSM denials
+    Audit {
+        /// Only show events for the current user
+        #[arg(long)]
+        me: bool,
+        /// Time range (journalctl --since format, default: "5min ago")
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter by role name
+        #[arg(long)]
+        role: Option<String>,
+        /// Follow new events in real time
+        #[arg(long, short)]
+        follow: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -43,6 +72,13 @@ fn main() -> Result<()> {
         Commands::Run { policy, cgroup, cmd } => run::run(policy, cgroup, cmd),
         Commands::Reload => reload(),
         Commands::Validate { path } => validate(&path),
+        Commands::Status => status::run(),
+        Commands::Enroll { role, pid } => {
+            enroll::run(pid.unwrap_or(std::process::id()), &role)
+        }
+        Commands::Audit { me, since, role, follow } => {
+            audit::run(me, since.as_deref(), role.as_deref(), follow)
+        }
     }
 }
 
@@ -72,7 +108,7 @@ fn reload() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid response: {}", e))?;
 
     if resp == serde_json::json!("Success") {
-        println!("Reload complete. Daemon re-evaluated the disable sentinel.");
+        println!("Reload signal sent. Daemon will re-read policy and user extensions.");
     } else if let Some(err) = resp.get("Error").and_then(|v| v.as_str()) {
         anyhow::bail!("reload failed: {}", err);
     } else {
