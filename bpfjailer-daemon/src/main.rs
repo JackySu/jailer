@@ -12,10 +12,30 @@ use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use tokio::sync::RwLock;
 
 const DEFAULT_POLICY_PATH: &str = "/etc/bpfjailer/policy.json";
 const LOCAL_POLICY_PATH: &str = "config/policy.json";
+
+/// Emergency disable: if this file exists, the daemon refuses to attach LSM
+/// hooks (or detaches them on SIGHUP). Designed for IT to remotely push a
+/// kill-switch via configuration management without needing to stop the
+/// daemon process itself.
+const DISABLED_SENTINEL: &str = "/etc/bpfjailer/disabled";
+
+fn is_disabled() -> bool {
+    Path::new(DISABLED_SENTINEL).exists()
+}
+
+fn log_disabled_banner() {
+    warn!("================================================================");
+    warn!("=  EMERGENCY DISABLE active: {} exists.", DISABLED_SENTINEL);
+    warn!("=  BPF LSM programs NOT attached. NO enforcement.");
+    warn!("=  Remove the sentinel and `systemctl reload bpfjailer-daemon`");
+    warn!("=  (or send SIGHUP) to re-enable enforcement.");
+    warn!("================================================================");
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,6 +50,15 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
+
+    // Emergency-disable gate: check sentinel BEFORE attaching LSM hooks. If
+    // the file is there we still start everything else (socket, policy load,
+    // map population), so removing the sentinel + SIGHUP is enough to resume.
+    if is_disabled() {
+        log_disabled_banner();
+    } else {
+        bpf.attach_lsm_programs()?;
+    }
 
     // Initialize policy manager with default roles
     let mut policy_manager = policy::PolicyManager::new()?;
@@ -125,6 +154,7 @@ async fn main() -> Result<()> {
         process_tracker.clone(),
         policy_manager.clone(),
         alt_enrollment.clone(),
+        bpf.clone(),
     );
 
     let server_handle = tokio::spawn(async move {
@@ -133,11 +163,42 @@ async fn main() -> Result<()> {
         }
     });
 
-    info!("BpfJailer daemon started");
-    info!("Press Ctrl+C to shutdown");
+    info!("BpfJailer daemon started (enforcement {})",
+          if bpf.is_attached() { "ON" } else { "OFF (disabled sentinel present)" });
+    info!("SIGHUP re-evaluates the disable sentinel; Ctrl+C shuts down.");
 
-    signal::ctrl_c().await?;
-    info!("Shutting down...");
+    let mut sighup = unix_signal(SignalKind::hangup())?;
+
+    loop {
+        tokio::select! {
+            _ = sighup.recv() => {
+                let now_disabled = is_disabled();
+                let was_attached = bpf.is_attached();
+                info!("SIGHUP received (disabled={}, was_attached={})", now_disabled, was_attached);
+                match (was_attached, now_disabled) {
+                    (true, true) => {
+                        warn!("Disable sentinel appeared, detaching LSM programs");
+                        bpf.detach_lsm_programs();
+                        log_disabled_banner();
+                    }
+                    (false, false) => {
+                        info!("Disable sentinel removed, re-attaching LSM programs");
+                        match bpf.attach_lsm_programs() {
+                            Ok(()) => info!("Enforcement resumed"),
+                            Err(e) => error!("Re-attach failed: {} (daemon still running, no enforcement)", e),
+                        }
+                    }
+                    _ => {
+                        info!("No state change required for this SIGHUP");
+                    }
+                }
+            }
+            _ = signal::ctrl_c() => {
+                info!("Shutting down...");
+                break;
+            }
+        }
+    }
 
     server_handle.abort();
 

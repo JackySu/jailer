@@ -13,6 +13,18 @@ pub enum EnrollmentRequest {
     Query {
         pid: u32,
     },
+    /// Ask the daemon to place the calling process into the jailer cgroup and
+    /// enroll it with the specified role. The daemon verifies the caller owns
+    /// the PID (via SO_PEERCRED) and does the privileged cgroup write itself.
+    /// This lets unprivileged users in the `bpfjailer` group use jailerctl
+    /// without sudo.
+    EnrollSelf {
+        role: String,
+    },
+    /// Ask the daemon to re-evaluate the disable sentinel (equivalent to
+    /// sending SIGHUP). Allows unprivileged users to trigger reload via socket
+    /// instead of needing kill permissions on the daemon process.
+    Reload,
     // Alternative enrollment management
     EnrollExecutable {
         executable_path: String,
@@ -54,6 +66,10 @@ pub enum EnrollmentResponse {
     XattrInfo {
         pod_id: PodId,
         role_id: RoleId,
+    },
+    /// Response to EnrollSelf — tells the caller which cgroup it was placed in.
+    Enrolled {
+        cgroup: String,
     },
 }
 

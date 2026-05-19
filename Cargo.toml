@@ -5,6 +5,7 @@ members = [
     "bpfjailer-client",
     "bpfjailer-daemon",
     "bpfjailer-bootstrap",
+    "jailerctl",
 ]
 exclude = [
     "test_task_storage",

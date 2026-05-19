@@ -1,13 +1,32 @@
 use anyhow::Result;
-use libbpf_rs::{MapFlags, Object, ObjectBuilder};
+use libbpf_rs::{Link, MapFlags, Object, ObjectBuilder};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+// LSM hook program names. Centralised so attach/detach use the same list.
+const LSM_PROGRAM_NAMES: &[&str] = &[
+    "task_alloc",
+    "file_open",
+    "socket_bind",
+    "socket_connect",
+    "socket_sendmsg",
+    "bprm_check_security",
+    "path_rename",
+    "sb_mount",
+    "sb_umount",
+];
+
 // Wrapper to make Object Send + Sync
 // libbpf-rs Object contains NonNull pointers that aren't Send/Sync by default
-// but in practice they're safe to share if we use Mutex for synchronization
+// but in practice they're safe to share if we use Mutex for synchronization.
+//
+// `links` holds the Link objects returned by attach_lsm(); dropping a Link
+// detaches its program from the kernel LSM hook. We keep them inside the
+// wrapper so an external caller (e.g. the SIGHUP handler / emergency disable)
+// can detach without re-loading the BPF object.
 pub struct BpfJailerBpf {
     object: Arc<Mutex<Object>>,
+    links: Arc<Mutex<Vec<Link>>>,
 }
 
 // Safety: Object is safe to send/share across threads when protected by Mutex
@@ -135,48 +154,74 @@ impl BpfJailerBpf {
             log::info!("✓ task_storage map created successfully");
         }
 
-        // Load and attach LSM programs
-        log::info!("Loading and attaching LSM programs...");
-        let program_names = [
-            "task_alloc",
-            "file_open",
-            "socket_bind",
-            "socket_connect",
-            "socket_sendmsg",
-            "bprm_check_security",
-            "path_rename",
-            "sb_mount",
-            "sb_umount",
-        ];
+        log::info!("BPF object loaded; LSM programs will be attached separately");
 
-        // LSM programs must be explicitly attached
-        for name in &program_names {
+        Ok(Self {
+            object: Arc::new(Mutex::new(object)),
+            links: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    /// Attach all LSM programs to the kernel hook chain. Idempotent: if
+    /// programs are already attached (links Vec non-empty), this is a no-op.
+    ///
+    /// Uses `attach_lsm()` explicitly rather than the generic `attach()` —
+    /// in libbpf-rs 0.21 + recent kernels, the generic dispatch can succeed
+    /// without actually wiring the program into the LSM hook chain.
+    pub fn attach_lsm_programs(&self) -> Result<()> {
+        let mut links_guard = self.links.lock().unwrap();
+        if !links_guard.is_empty() {
+            log::info!(
+                "LSM programs already attached ({} links). attach is a no-op.",
+                links_guard.len()
+            );
+            return Ok(());
+        }
+
+        let mut object = self.object.lock().unwrap();
+        log::info!("Attaching {} LSM programs...", LSM_PROGRAM_NAMES.len());
+
+        let mut new_links = Vec::with_capacity(LSM_PROGRAM_NAMES.len());
+        for name in LSM_PROGRAM_NAMES {
             match object.prog_mut(name) {
-                Some(prog) => {
-                    match prog.attach() {
-                        Ok(link) => {
-                            // Keep the link alive by leaking it (daemon keeps running)
-                            // In production, you'd store these in a Vec
-                            std::mem::forget(link);
-                            log::info!("✓ Program {} attached", name);
-                        }
-                        Err(e) => {
-                            log::error!("Failed to attach program {}: {}", name, e);
-                            return Err(anyhow::anyhow!("Failed to attach {}: {}", name, e));
-                        }
+                Some(prog) => match prog.attach_lsm() {
+                    Ok(link) => {
+                        log::info!("✓ Program {} attached (LSM)", name);
+                        new_links.push(link);
                     }
-                }
+                    Err(e) => {
+                        // Drop any links we already created so the kernel
+                        // doesn't end up in a half-attached state.
+                        drop(new_links);
+                        log::error!("Failed to attach LSM program {}: {}", name, e);
+                        return Err(anyhow::anyhow!("Failed to attach {}: {}", name, e));
+                    }
+                },
                 None => {
                     log::warn!("Program {} not found in eBPF object", name);
                 }
             }
         }
 
-        log::info!("All eBPF programs loaded and attached successfully");
+        links_guard.extend(new_links);
+        log::info!("All LSM programs attached ({} links held)", links_guard.len());
+        Ok(())
+    }
 
-        Ok(Self {
-            object: Arc::new(Mutex::new(object)),
-        })
+    /// Detach all LSM programs by dropping the Link objects. The BPF object
+    /// itself stays loaded and the populated maps remain intact, so a
+    /// subsequent `attach_lsm_programs()` resumes enforcement instantly
+    /// without re-populating maps.
+    pub fn detach_lsm_programs(&self) {
+        let mut links = self.links.lock().unwrap();
+        let count = links.len();
+        links.clear(); // Drop runs bpf_link__destroy on each link.
+        log::info!("Detached {} LSM programs (BPF maps remain populated)", count);
+    }
+
+    /// Whether LSM enforcement is currently active.
+    pub fn is_attached(&self) -> bool {
+        !self.links.lock().unwrap().is_empty()
     }
 
     pub fn update_pod_role(&self, pod_id: u64, role_id: u32) -> Result<()> {

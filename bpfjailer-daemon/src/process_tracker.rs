@@ -16,6 +16,69 @@ pub struct ProcessTracker {
     bpf: Arc<BpfJailerBpf>,
 }
 
+/// Expand a policy path pattern into one or more concrete absolute paths.
+///
+/// - A pattern with no leading `~` is returned unchanged.
+/// - `~/<suffix>` is ambiguous because the daemon runs as root and doesn't
+///   know whose home the enrolled binary will run as, so it expands to BOTH
+///   `/home/*/<suffix>` (any user under /home) and `/root/<suffix>` (root's
+///   home). The `*` is the existing state-machine wildcard.
+/// - `~<user>/<suffix>` looks up that user's home dir in `/etc/passwd` and
+///   substitutes it.
+///
+/// Trailing slash semantics are preserved so directory-pattern handling in
+/// `add_path_state` continues to install the "match anything under this dir"
+/// wildcard transition.
+fn expand_pattern(pattern: &str) -> Vec<String> {
+    if !pattern.starts_with('~') {
+        return vec![pattern.to_string()];
+    }
+
+    // `~/...` form
+    if let Some(suffix) = pattern.strip_prefix("~/") {
+        return vec![
+            format!("/home/*/{}", suffix),
+            format!("/root/{}", suffix),
+        ];
+    }
+
+    // `~user/...` or `~user` form
+    let rest = &pattern[1..];
+    let (user, suffix) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, ""),
+    };
+
+    if let Some(home) = lookup_user_home(user) {
+        let path = if suffix.is_empty() {
+            home
+        } else {
+            format!("{}/{}", home.trim_end_matches('/'), suffix)
+        };
+        return vec![path];
+    }
+
+    // Unknown user — fall back to the literal pattern; the daemon logs the
+    // resulting (likely-unmatchable) state-machine entry, which is more useful
+    // than silently dropping the rule.
+    log::warn!("expand_pattern: unknown user in pattern \"{}\", inserting literally", pattern);
+    vec![pattern.to_string()]
+}
+
+/// Look up a user's home directory from `/etc/passwd`. Returns `None` if the
+/// user isn't found or the file can't be read.
+fn lookup_user_home(user: &str) -> Option<String> {
+    let content = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in content.lines() {
+        let mut fields = line.split(':');
+        if fields.next() == Some(user) {
+            // passwd format: name:passwd:uid:gid:gecos:home:shell
+            return fields.nth(4).map(|s| s.to_string());
+        }
+    }
+    None
+}
+
 // Convert PolicyFlags to u8 for BPF map
 // bit 0 (0x01) = allow_file_access
 // bit 1 (0x02) = allow_network
@@ -151,26 +214,34 @@ impl ProcessTracker {
             .context("Failed to add path state")
     }
 
-    /// Apply path rules from a Role definition using state machine
+    /// Apply path rules from a Role definition using state machine.
+    ///
+    /// Patterns are expanded into one or more concrete absolute paths before
+    /// being inserted into the BPF state machine. Supported sugar:
+    ///   - `~/...`        → `/home/*/...` and `/root/...` (matches any user home)
+    ///   - `~<user>/...`  → that user's home (looked up via /etc/passwd)
+    ///   - trailing `/**` / `/*` are trimmed (matched via the directory wildcard)
     pub fn apply_path_rules(&self, role_id: RoleId, rules: &[PathPattern]) -> Result<()> {
         for rule in rules {
-            // Normalize path - ensure directory prefixes end with /
-            let path = if rule.pattern.ends_with("/**") {
-                // Convert glob pattern to prefix
-                rule.pattern.trim_end_matches("**").to_string()
-            } else if rule.pattern.ends_with("/*") {
-                rule.pattern.trim_end_matches('*').to_string()
-            } else {
-                rule.pattern.clone()
-            };
+            let expanded = expand_pattern(&rule.pattern);
 
-            // Use state machine approach (dentry walking)
-            self.add_path_state(role_id, &path, rule.allow)?;
+            for pat in expanded {
+                // Normalize trailing globs
+                let path = if pat.ends_with("/**") {
+                    pat.trim_end_matches("**").to_string()
+                } else if pat.ends_with("/*") {
+                    pat.trim_end_matches('*').to_string()
+                } else {
+                    pat.clone()
+                };
 
-            info!(
-                "Applied path rule: role={} path=\"{}\" allow={}",
-                role_id.0, path, rule.allow
-            );
+                self.add_path_state(role_id, &path, rule.allow)?;
+
+                info!(
+                    "Applied path rule: role={} path=\"{}\" allow={} (from \"{}\")",
+                    role_id.0, path, rule.allow, rule.pattern
+                );
+            }
         }
         Ok(())
     }

@@ -325,15 +325,33 @@ static __always_inline u32 hash_component(const unsigned char *name, u32 len)
     return hash;
 }
 
-// Walk dentry tree and collect path component hashes (bottom-up)
-static __always_inline int collect_path_components(struct dentry *dentry, struct path_components *buf)
+// Walk dentry tree and collect path component hashes (bottom-up), traversing
+// across mount boundaries to produce the user-visible path.
+//
+// Single-mount case: walks dentries until parent == current (filesystem root).
+// Cross-mount case: on hitting a mount root, follows mnt->mnt_parent /
+// mnt->mnt_mountpoint to continue walking in the parent mount. Required for
+// BTRFS subvolume layouts where e.g. /etc lives in @ (subvol=/@) and /home in
+// @home (subvol=/@home) — the dentry chain inside each subvolume terminates
+// at its own subvolume root long before reaching the /-mount visible to
+// userspace. Without this crossing, /home/sushi/.ssh would only see
+// ["sushi", ".ssh"] and miss the "home" component the policy was written for.
+static __always_inline int collect_path_components(struct file *file,
+                                                    struct path_components *buf)
 {
-    struct dentry *current = dentry;
+    struct dentry *current = BPF_CORE_READ(file, f_path.dentry);
+    struct vfsmount *vfsmnt = BPF_CORE_READ(file, f_path.mnt);
+    struct mount *mnt = NULL;
+    if (vfsmnt) {
+        mnt = (struct mount *)((char *)vfsmnt - offsetof(struct mount, mnt));
+    }
     struct dentry *parent = NULL;
     buf->count = 0;
 
+    // Bounded loop, but allow a couple extra iterations per real component
+    // since mount crossings consume an iteration without producing a hash.
     #pragma unroll
-    for (int i = 0; i < MAX_COMPONENTS; i++) {
+    for (int i = 0; i < MAX_COMPONENTS * 2; i++) {
         if (!current)
             break;
 
@@ -341,19 +359,38 @@ static __always_inline int collect_path_components(struct dentry *dentry, struct
         if (buf->count >= MAX_COMPONENTS)
             break;
 
-        // Read parent pointer using CO-RE
+        // Read mount root for the current mount (may be NULL if mnt is NULL).
+        struct dentry *mnt_root = NULL;
+        if (mnt)
+            mnt_root = BPF_CORE_READ(mnt, mnt.mnt_root);
+
+        // If we've reached the mount root, try to cross into the parent mount.
+        if (mnt && current == mnt_root) {
+            struct mount *parent_mount = BPF_CORE_READ(mnt, mnt_parent);
+            // No parent (or parent is self) → this is the namespace root, stop.
+            if (!parent_mount || parent_mount == mnt)
+                break;
+            struct dentry *mountpoint = BPF_CORE_READ(mnt, mnt_mountpoint);
+            if (!mountpoint)
+                break;
+            // Continue walking in the parent mount starting at the dentry
+            // where this mount was attached.
+            current = mountpoint;
+            mnt = parent_mount;
+            continue;
+        }
+
+        // Normal case: read d_parent and the component name.
         parent = BPF_CORE_READ(current, d_parent);
 
-        // If parent == current, we've reached root
+        // Filesystem-root sentinel when there's no mount info to fall back on.
         if (parent == current)
             break;
 
-        // Read d_name using CO-RE
         u32 len = BPF_CORE_READ(current, d_name.len);
         const unsigned char *name = BPF_CORE_READ(current, d_name.name);
 
         if (len > 0 && name) {
-            // Use local index for verifier
             u8 idx = buf->count;
             if (idx < MAX_COMPONENTS) {
                 buf->hashes[idx] = hash_component(name, len);
@@ -457,6 +494,7 @@ static __always_inline void check_pending_enrollment(struct task_struct *task, u
 SEC("lsm/task_alloc")
 int BPF_PROG(task_alloc, struct task_struct *task, unsigned long clone_flags, u64 stack_start)
 {
+    bpf_printk("bpfjailer: task_alloc fired");
     struct process_info *info = bpf_task_storage_get(&task_storage, task, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
     if (!info) {
         return 0;
@@ -498,6 +536,8 @@ int BPF_PROG(file_open, struct file *file)
         return 0;
     }
 
+    bpf_printk("bpfjailer: file_open pid=%u pod=%llu role=%u", pid, info->pod_id, info->role_id);
+
     u8 *flags = bpf_map_lookup_elem(&role_flags, &info->role_id);
     if (!flags) {
         emit_audit_event(ctx, pid, info->role_id, info->pod_id,
@@ -505,7 +545,8 @@ int BPF_PROG(file_open, struct file *file)
         return -13;
     }
 
-    // Get dentry from file->f_path using CO-RE
+    // Get dentry for inode cache lookups; collect_path_components reads
+    // file->f_path.mnt itself so it can cross mount boundaries.
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
 
     if (dentry) {
@@ -537,11 +578,14 @@ int BPF_PROG(file_open, struct file *file)
         struct path_components *buf = bpf_map_lookup_elem(&path_buf, &zero);
 
         if (buf) {
-            // Collect path components by walking dentry tree
-            collect_path_components(dentry, buf);
+            // Collect path components by walking dentry tree and crossing
+            // mount boundaries so subvolume / chroot mounts don't truncate
+            // the user-visible path.
+            collect_path_components(file, buf);
 
             // Run state machine
             int result = check_path_state_machine(info->role_id, buf);
+            bpf_printk("bpfjailer: path_match role=%u count=%u result=%d", info->role_id, buf->count, result);
 
             if (result != 0) {
                 // Cache the decision with current generation
@@ -902,12 +946,18 @@ int BPF_PROG(bprm_check_security, struct linux_binprm *bprm)
 
     // If not enrolled, check for auto-enrollment by executable inode
     if (info->pod_id == 0) {
-        // Get executable file's inode
-        struct file *exe_file = BPF_CORE_READ(bprm, file);
+        // Prefer bprm->executable (the original binary) over bprm->file,
+        // since bprm->file can be reassigned to an interpreter during
+        // shebang script handling in newer kernels.
+        struct file *exe_file = BPF_CORE_READ(bprm, executable);
+        if (!exe_file) {
+            exe_file = BPF_CORE_READ(bprm, file);
+        }
         if (exe_file) {
             struct inode *exe_inode = BPF_CORE_READ(exe_file, f_inode);
             if (exe_inode) {
                 u64 ino = BPF_CORE_READ(exe_inode, i_ino);
+                bpf_printk("bpfjailer: bprm_check ino=%llu", ino);
                 struct exec_enrollment_value *enroll = bpf_map_lookup_elem(&exec_enrollment, &ino);
                 if (enroll) {
                     // Auto-enroll based on executable
@@ -915,6 +965,7 @@ int BPF_PROG(bprm_check_security, struct linux_binprm *bprm)
                     info->role_id = enroll->role_id;
                     info->stack_depth = 0;
                     info->flags = 0;
+                    bpf_printk("bpfjailer: enrolled pod=%llu role=%u", enroll->pod_id, enroll->role_id);
                     // This is the initial enrollment, allow the exec
                     return 0;
                 }
