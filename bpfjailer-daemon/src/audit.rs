@@ -107,7 +107,7 @@ fn run_audit_loop(bpf: &BpfJailerBpf) -> anyhow::Result<()> {
             // Log as structured key=value for easy parsing by log aggregators.
             // When journald integration is added, these become journal fields.
             info!(
-                target: "bpfjailer_audit",
+                target: "icb_sandbox_audit",
                 "pid={} role_id={} pod_id={} decision={} hook={} context=0x{:x}",
                 event.pid,
                 event.role_id,

@@ -1,11 +1,11 @@
 [package]
 name = "jailerctl"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
-description = "CLI for managing bpfjailer"
+description = "CLI for managing icb-sandbox"
 
 [[bin]]
-name = "jailerctl"
+name = "icb-sandbox-ctl"
 path = "src/main.rs"
 
 [dependencies]

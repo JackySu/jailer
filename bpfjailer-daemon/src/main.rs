@@ -17,14 +17,17 @@ use tokio::signal;
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use tokio::sync::RwLock;
 
-const DEFAULT_POLICY_PATH: &str = "/etc/bpfjailer/policy.json";
-const LOCAL_POLICY_PATH: &str = "config/policy.json";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const GIT_HASH: &str = env!("ICB_SANDBOX_GIT_HASH");
+
+const DEFAULT_POLICY_PATH: &str = "/etc/icb/sandbox/policy.toml";
+const LOCAL_POLICY_PATH: &str = "config/policy.toml";
 
 /// Emergency disable: if this file exists, the daemon refuses to attach LSM
 /// hooks (or detaches them on SIGHUP). Designed for IT to remotely push a
 /// kill-switch via configuration management without needing to stop the
 /// daemon process itself.
-const DISABLED_SENTINEL: &str = "/etc/bpfjailer/disabled";
+const DISABLED_SENTINEL: &str = "/etc/icb/sandbox/disabled";
 
 fn is_disabled() -> bool {
     Path::new(DISABLED_SENTINEL).exists()
@@ -34,16 +37,51 @@ fn log_disabled_banner() {
     warn!("================================================================");
     warn!("=  EMERGENCY DISABLE active: {} exists.", DISABLED_SENTINEL);
     warn!("=  BPF LSM programs NOT attached. NO enforcement.");
-    warn!("=  Remove the sentinel and `systemctl reload bpfjailer-daemon`");
+    warn!("=  Remove the sentinel and `systemctl reload icb-sandboxd`");
     warn!("=  (or send SIGHUP) to re-enable enforcement.");
     warn!("================================================================");
+}
+
+fn check_kernel_requirements() -> Result<()> {
+    use std::fs;
+
+    // Check BTF availability
+    if !Path::new("/sys/kernel/btf/vmlinux").exists() {
+        anyhow::bail!(
+            "Kernel BTF not available (/sys/kernel/btf/vmlinux missing).\n\
+             icb-sandbox requires CONFIG_DEBUG_INFO_BTF=y in your kernel config."
+        );
+    }
+
+    // Check BPF LSM is enabled
+    let lsm = fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+    if !lsm.contains("bpf") {
+        anyhow::bail!(
+            "BPF LSM not enabled (current LSMs: {}).\n\
+             Add lsm=bpf to your kernel boot parameters (e.g. in /etc/default/grub).",
+            lsm.trim()
+        );
+    }
+
+    info!("Kernel requirements satisfied (BTF=ok, LSM=bpf)");
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
 
-    info!("BpfJailer daemon starting...");
+    if env::args().any(|a| a == "--version" || a == "-V") {
+        println!("icb-sandboxd {} ({})", VERSION, GIT_HASH);
+        return Ok(());
+    }
+
+    info!("icb-sandboxd {} ({}) starting...", VERSION, GIT_HASH);
+
+    if let Err(e) = check_kernel_requirements() {
+        error!("{}", e);
+        return Err(e);
+    }
 
     let bpf = match bpf_loader::BpfJailerBpf::load() {
         Ok(b) => Arc::new(b),
@@ -69,7 +107,7 @@ async fn main() -> Result<()> {
     let mut policy_manager = policy::PolicyManager::new()?;
 
     // Load policy from file if available
-    let policy_path = env::var("BPFJAILER_POLICY")
+    let policy_path = env::var("ICB_SANDBOX_POLICY")
         .ok()
         .or_else(|| {
             if Path::new(DEFAULT_POLICY_PATH).exists() {
@@ -90,7 +128,7 @@ async fn main() -> Result<()> {
         info!("No policy file found, using default roles");
     }
 
-    // Load per-user extensions from ~/.config/bpfjailer/policy.json
+    // Load per-user extensions from ~/.config/icb/sandbox/policy.toml
     let ext_errors = policy_manager.load_user_extensions();
     for e in &ext_errors {
         error!("user_extension: {}", e);
@@ -211,7 +249,7 @@ async fn main() -> Result<()> {
                 }
 
                 let mut pm = policy_manager.write().await;
-                let policy_file = env::var("BPFJAILER_POLICY")
+                let policy_file = env::var("ICB_SANDBOX_POLICY")
                     .ok()
                     .or_else(|| {
                         if Path::new(DEFAULT_POLICY_PATH).exists() {
@@ -237,16 +275,25 @@ async fn main() -> Result<()> {
                 }
 
                 // Re-apply all rules from reloaded policy
-                let all_patterns: Vec<String> = pm.config().roles.values()
+                let mut all_patterns: Vec<String> = pm.config().roles.values()
                     .flat_map(|role| role.file_paths.iter().map(|p| p.pattern.clone()))
                     .collect();
+
+                // Include user extension patterns
+                for exts in pm.all_extensions().values() {
+                    for ext in exts {
+                        all_patterns.push(ext.pattern.clone());
+                    }
+                }
 
                 for (_name, role) in pm.config().roles.iter() {
                     let role_id = role.id;
                     if let Err(e) = process_tracker.set_role_policy(role_id, &role.flags) {
                         warn!("reload: set_role_policy {}: {}", role_id.0, e);
                     }
-                    if let Err(e) = process_tracker.apply_path_rules(role_id, &role.file_paths) {
+                    // Apply base path rules + user extensions for this role
+                    let effective = pm.effective_file_paths_all(role_id);
+                    if let Err(e) = process_tracker.apply_path_rules(role_id, &effective) {
                         warn!("reload: apply_path_rules {}: {}", role_id.0, e);
                     }
                     if !role.ip_rules.is_empty() {

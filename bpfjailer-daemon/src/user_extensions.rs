@@ -40,7 +40,7 @@ pub fn discover_user_configs() -> Vec<(u32, String, PathBuf)> {
         }
 
         let config_path = PathBuf::from(home)
-            .join(".config/bpfjailer/policy.json");
+            .join(".config/icb/sandbox/policy.toml");
         if config_path.exists() {
             results.push((uid, username.to_string(), config_path));
         }
@@ -69,7 +69,8 @@ pub fn load_user_config(path: &Path, uid: u32) -> Result<UserExtensionConfig> {
     }
 
     let content = std::fs::read_to_string(path)?;
-    let config: UserExtensionConfig = serde_json::from_str(&content)?;
+    let config: UserExtensionConfig = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("invalid user extension TOML: {}", e))?;
     Ok(config)
 }
 

@@ -1,0 +1,25 @@
+FROM rust:alpine AS builder
+
+RUN apk add --no-cache \
+    musl-dev \
+    elfutils-dev \
+    zlib-static \
+    zlib-dev \
+    zstd-static \
+    zstd-dev \
+    clang \
+    llvm \
+    make \
+    git \
+    linux-headers
+
+WORKDIR /build
+COPY . .
+
+ENV RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-lzstd"
+RUN cargo build --release --target x86_64-unknown-linux-musl \
+    -p bpfjailer-daemon -p jailerctl -p bpfjailer-bootstrap
+
+RUN strip target/x86_64-unknown-linux-musl/release/icb-sandboxd \
+         target/x86_64-unknown-linux-musl/release/icb-sandbox-ctl \
+         target/x86_64-unknown-linux-musl/release/icb-sandbox-bootstrap

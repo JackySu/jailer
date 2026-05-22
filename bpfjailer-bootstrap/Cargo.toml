@@ -2,10 +2,10 @@
 name = "bpfjailer-bootstrap"
 version = "0.1.0"
 edition = "2021"
-description = "BpfJailer bootstrap loader for daemonless installation"
+description = "icb-sandbox bootstrap loader for daemonless installation"
 
 [[bin]]
-name = "bpfjailer-bootstrap"
+name = "icb-sandbox-bootstrap"
 path = "src/main.rs"
 
 [dependencies]

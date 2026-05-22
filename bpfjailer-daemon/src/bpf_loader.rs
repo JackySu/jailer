@@ -49,6 +49,7 @@ impl BpfJailerBpf {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let possible_paths = [
+            PathBuf::from("/usr/lib/icb-sandbox/bpfjailer.bpf.o"),
             workspace_root.join("target/bpfel-unknown-none/release/bpfjailer.bpf.o"),
             workspace_root.join("target/bpfel-unknown-none/debug/bpfjailer.bpf.o"),
             workspace_root.join("bpfjailer-bpf/target/bpfel-unknown-none/release/bpfjailer.bpf.o"),
@@ -808,7 +809,7 @@ impl BpfJailerBpf {
     }
 
     /// Path where BPF objects are pinned
-    pub const BPF_PIN_PATH: &'static str = "/sys/fs/bpf/bpfjailer";
+    pub const BPF_PIN_PATH: &'static str = "/sys/fs/bpf/icb-sandbox";
 
     /// Check if BPF programs are already pinned
     pub fn is_pinned() -> bool {

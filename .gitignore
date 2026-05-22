@@ -45,3 +45,11 @@ certs
 *.rpm
 null
 *.log
+*.bak
+
+# Claude Code
+.claude/
+
+# AppImage build output
+packaging/out/
+packaging/icb-agent

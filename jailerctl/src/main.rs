@@ -3,12 +3,17 @@ mod run;
 mod status;
 mod enroll;
 mod audit;
+mod effective_policy;
+mod uninstall;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const GIT_HASH: &str = env!("ICB_SANDBOX_GIT_HASH");
+
 #[derive(Parser)]
-#[command(name = "jailerctl", about = "CLI for managing bpfjailer")]
+#[command(name = "icb-sandbox-ctl", about = "CLI for managing icb-sandbox", version = VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -16,14 +21,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Check system readiness for bpfjailer
+    /// Check system readiness for icb-sandbox
     Doctor,
-    /// Run a command inside the jailer sandbox
+    /// Run a command inside the sandbox
     Run {
-        /// Policy file to use (default: /etc/bpfjailer/policy.json)
+        /// Policy file to use (default: /etc/icb/sandbox/policy.toml)
         #[arg(long, short)]
         policy: Option<String>,
-        /// Cgroup path to join (default: /sys/fs/cgroup/bpfjailer/code-agent)
+        /// Cgroup path to join (default: /sys/fs/cgroup/icb-sandbox/code-agent)
         #[arg(long)]
         cgroup: Option<String>,
         /// Command to run (default: bash --login)
@@ -39,7 +44,7 @@ enum Commands {
     },
     /// Show daemon status (attached state, loaded policy summary)
     Status,
-    /// Enroll a process into a jailer role
+    /// Enroll a process into a sandbox role
     Enroll {
         /// Role name to assign
         #[arg(long, short, default_value = "code_agent")]
@@ -63,6 +68,14 @@ enum Commands {
         #[arg(long, short)]
         follow: bool,
     },
+    /// Show effective policy for current user (merged base + drop-in + user extensions)
+    EffectivePolicy,
+    /// Uninstall icb-sandbox from the system (requires sudo)
+    Uninstall {
+        /// Also remove config files and user data
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -79,6 +92,8 @@ fn main() -> Result<()> {
         Commands::Audit { me, since, role, follow } => {
             audit::run(me, since.as_deref(), role.as_deref(), follow)
         }
+        Commands::EffectivePolicy => effective_policy::run(),
+        Commands::Uninstall { purge } => uninstall::run(purge),
     }
 }
 
@@ -86,10 +101,10 @@ fn reload() -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
-    let socket_path = "/run/bpfjailer/enrollment.sock";
+    let socket_path = "/run/icb-sandbox/enrollment.sock";
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| anyhow::anyhow!(
-            "cannot connect to {}: {}. Is the daemon running? Are you in the 'bpfjailer' group?",
+            "cannot connect to {}: {}. Is the daemon running? Are you in the 'icb-sandbox' group?",
             socket_path, e
         ))?;
 

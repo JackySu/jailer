@@ -20,7 +20,7 @@ pub fn run() -> Result<()> {
     checks.push(check_daemon_running());
     checks.push(check_disabled_sentinel());
 
-    println!("jailerctl doctor — system readiness check\n");
+    println!("icb-sandbox-ctl doctor — system readiness check\n");
 
     let mut all_pass = true;
     for c in &checks {
@@ -33,9 +33,9 @@ pub fn run() -> Result<()> {
 
     println!();
     if all_pass {
-        println!("\x1b[32mAll checks passed.\x1b[0m Ready to run bpfjailer.");
+        println!("\x1b[32mAll checks passed.\x1b[0m Ready to run icb-sandbox.");
     } else {
-        println!("\x1b[31mSome checks failed.\x1b[0m Fix the issues above before running bpfjailer.");
+        println!("\x1b[31mSome checks failed.\x1b[0m Fix the issues above before running icb-sandbox.");
         bail!("doctor failed");
     }
     Ok(())
@@ -147,38 +147,38 @@ fn check_cgroup_v2() -> Check {
 
 fn check_daemon_running() -> Check {
     let name = "Daemon running";
-    let socket = Path::new("/run/bpfjailer/enrollment.sock");
+    let socket = Path::new("/run/icb-sandbox/enrollment.sock");
     if socket.exists() {
         let pid = Command::new("pidof")
-            .arg("bpfjailer-daemon")
+            .arg("icb-sandboxd")
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .unwrap_or_default();
         let pid_trimmed = pid.trim();
         let via_systemd = Command::new("systemctl")
-            .args(["is-active", "bpfjailer-daemon"])
+            .args(["is-active", "icb-sandboxd"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
         let detail = if via_systemd {
-            format!("pid={} (systemd, logs: journalctl -u bpfjailer-daemon)", pid_trimmed)
+            format!("pid={} (systemd, logs: journalctl -u icb-sandboxd)", pid_trimmed)
         } else {
-            format!("pid={} (manual, logs: stderr or /tmp/bpfjailer-daemon.log)", pid_trimmed)
+            format!("pid={} (manual, logs: stderr or /tmp/icb-sandboxd.log)", pid_trimmed)
         };
         Check { name, pass: true, detail }
     } else {
         Check {
             name,
             pass: false,
-            detail: "no socket at /run/bpfjailer/enrollment.sock".into(),
+            detail: "no socket at /run/icb-sandbox/enrollment.sock".into(),
         }
     }
 }
 
 fn check_disabled_sentinel() -> Check {
     let name = "Emergency disable";
-    let sentinel = Path::new("/etc/bpfjailer/disabled");
+    let sentinel = Path::new("/etc/icb/sandbox/disabled");
     if sentinel.exists() {
         Check {
             name,

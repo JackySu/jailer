@@ -944,11 +944,10 @@ int BPF_PROG(bprm_check_security, struct linux_binprm *bprm)
     // Track if this process was already enrolled before this exec
     u8 was_enrolled = (info->pod_id != 0);
 
-    // If not enrolled, check for auto-enrollment by executable inode
-    if (info->pod_id == 0) {
-        // Prefer bprm->executable (the original binary) over bprm->file,
-        // since bprm->file can be reassigned to an interpreter during
-        // shebang script handling in newer kernels.
+    // Always check exec_enrollment by inode — overrides cgroup enrollment
+    // so that specific executables (e.g. git, docker) can run under a
+    // different role with relaxed path rules.
+    {
         struct file *exe_file = BPF_CORE_READ(bprm, executable);
         if (!exe_file) {
             exe_file = BPF_CORE_READ(bprm, file);
@@ -960,20 +959,18 @@ int BPF_PROG(bprm_check_security, struct linux_binprm *bprm)
                 bpf_printk("bpfjailer: bprm_check ino=%llu", ino);
                 struct exec_enrollment_value *enroll = bpf_map_lookup_elem(&exec_enrollment, &ino);
                 if (enroll) {
-                    // Auto-enroll based on executable
                     info->pod_id = enroll->pod_id;
                     info->role_id = enroll->role_id;
                     info->stack_depth = 0;
                     info->flags = 0;
-                    bpf_printk("bpfjailer: enrolled pod=%llu role=%u", enroll->pod_id, enroll->role_id);
-                    // This is the initial enrollment, allow the exec
+                    bpf_printk("bpfjailer: exec_enroll pod=%llu role=%u", enroll->pod_id, enroll->role_id);
                     return 0;
                 }
             }
         }
     }
 
-    // If still not enrolled, check for auto-enrollment by cgroup
+    // If not enrolled, check for auto-enrollment by cgroup
     if (info->pod_id == 0) {
         u64 cgroup_id = bpf_get_current_cgroup_id();
         struct exec_enrollment_value *enroll = bpf_map_lookup_elem(&cgroup_enrollment, &cgroup_id);

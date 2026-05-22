@@ -71,6 +71,7 @@ pub struct Role {
     pub file_paths: Vec<PathPattern>,
     pub network_rules: Vec<NetworkRule>,
     pub execution_rules: Vec<ExecutionRule>,
+    #[serde(default)]
     pub require_signed_binary: bool,
     /// IP/CIDR-based egress rules
     #[serde(default)]

@@ -6,7 +6,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
-const SOCKET_PATH: &str = "/run/bpfjailer/enrollment.sock";
+const SOCKET_PATH: &str = "/run/icb-sandbox/enrollment.sock";
 
 pub fn run(policy: Option<String>, cgroup: Option<String>, cmd: Vec<String>) -> Result<()> {
     let _ = policy; // reserved for future use
@@ -14,9 +14,9 @@ pub fn run(policy: Option<String>, cgroup: Option<String>, cmd: Vec<String>) -> 
 
     // Guard: refuse to nest
     let my_cg = current_cgroup()?;
-    if my_cg.starts_with("/bpfjailer/") {
+    if my_cg.starts_with("/icb-sandbox/") {
         bail!(
-            "Already inside a jailed shell (cgroup={}). Exit first.",
+            "Already inside a sandboxed shell (cgroup={}). Exit first.",
             my_cg
         );
     }
@@ -25,21 +25,21 @@ pub fn run(policy: Option<String>, cgroup: Option<String>, cmd: Vec<String>) -> 
     if !Path::new(SOCKET_PATH).exists() {
         bail!(
             "Daemon not running (no socket at {}). Start it first:\n  \
-             sudo systemctl start bpfjailer-daemon",
+             sudo systemctl start icb-sandboxd",
             SOCKET_PATH
         );
     }
 
     // Ask daemon to enroll our PID into the cgroup
-    eprintln!("[jailerctl] requesting enrollment from daemon...");
+    eprintln!("[icb-sandbox-ctl] requesting enrollment from daemon...");
     let enrolled_cgroup = enroll_via_socket("code_agent")?;
-    eprintln!("[jailerctl] enrolled: ok ({})", enrolled_cgroup);
+    eprintln!("[icb-sandbox-ctl] enrolled: ok ({})", enrolled_cgroup);
 
     // Verify via /proc/self/cgroup
     let new_cg = current_cgroup()?;
-    if !new_cg.starts_with("/bpfjailer/") {
+    if !new_cg.starts_with("/icb-sandbox/") {
         bail!(
-            "Cgroup join failed: expected /bpfjailer/..., got {}",
+            "Cgroup join failed: expected /icb-sandbox/..., got {}",
             new_cg
         );
     }
@@ -54,12 +54,12 @@ pub fn run(policy: Option<String>, cgroup: Option<String>, cmd: Vec<String>) -> 
         (prog, rest)
     };
 
-    eprintln!("[jailerctl] exec: {} {}", program, args.join(" "));
+    eprintln!("[icb-sandbox-ctl] exec: {} {}", program, args.join(" "));
 
     // exec replaces this process — the new process inherits the cgroup
     let err = Command::new(&program)
         .args(&args)
-        .env("BPFJAILER_ROLE", "code_agent")
+        .env("ICB_SANDBOX_ROLE", "code_agent")
         .exec();
 
     bail!("exec failed: {}", err);
@@ -70,7 +70,7 @@ pub fn run(policy: Option<String>, cgroup: Option<String>, cmd: Vec<String>) -> 
 fn enroll_via_socket(role: &str) -> Result<String> {
     let mut stream = UnixStream::connect(SOCKET_PATH)
         .map_err(|e| anyhow::anyhow!(
-            "cannot connect to {}: {}. Are you in the 'bpfjailer' group?",
+            "cannot connect to {}: {}. Are you in the 'icb-sandbox' group?",
             SOCKET_PATH, e
         ))?;
 

@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-const SOCKET_PATH: &str = "/run/bpfjailer/enrollment.sock";
+const SOCKET_PATH: &str = "/run/icb-sandbox/enrollment.sock";
 
 pub fn run(pid: u32, role: &str) -> Result<()> {
     let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {

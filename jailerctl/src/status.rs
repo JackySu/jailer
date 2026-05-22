@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-const SOCKET_PATH: &str = "/run/bpfjailer/enrollment.sock";
+const SOCKET_PATH: &str = "/run/icb-sandbox/enrollment.sock";
 
 pub fn run() -> Result<()> {
     let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {
@@ -38,7 +38,7 @@ pub fn run() -> Result<()> {
         let status_icon = if attached { "\x1b[32m●\x1b[0m" } else { "\x1b[31m○\x1b[0m" };
         let status_text = if attached { "enforcing" } else { "disabled" };
 
-        println!("{} bpfjailer-daemon: {}", status_icon, status_text);
+        println!("{} icb-sandboxd: {}", status_icon, status_text);
         println!("  LSM hooks:    {}", hooks);
         println!("  Policy:       {}", policy);
         if let Some(role_list) = roles {

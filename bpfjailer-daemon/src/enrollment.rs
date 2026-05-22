@@ -11,9 +11,9 @@ use crate::process_tracker::ProcessTracker;
 use crate::policy::PolicyManager;
 use crate::enrollment_alternatives::AlternativeEnrollment;
 
-const SOCKET_PATH: &str = "/run/bpfjailer/enrollment.sock";
-const CGROUP_BASE: &str = "/sys/fs/cgroup/bpfjailer";
-const BPFJAILER_GROUP: &str = "bpfjailer";
+const SOCKET_PATH: &str = "/run/icb-sandbox/enrollment.sock";
+const CGROUP_BASE: &str = "/sys/fs/cgroup/icb-sandbox";
+const BPFJAILER_GROUP: &str = "icb-sandbox";
 
 pub struct EnrollmentServer {
     process_tracker: Arc<ProcessTracker>,
@@ -49,8 +49,8 @@ impl EnrollmentServer {
         let listener = AsyncUnixListener::bind(SOCKET_PATH)
             .context("Failed to bind enrollment socket")?;
 
-        // Set socket permissions to root:bpfjailer 0660 so unprivileged users
-        // in the bpfjailer group can connect without sudo.
+        // Set socket permissions to root:icb-sandbox 0660 so unprivileged users
+        // in the icb-sandbox group can connect without sudo.
         Self::set_socket_permissions()?;
 
         info!("Enrollment server listening on {}", SOCKET_PATH);
@@ -79,7 +79,7 @@ impl EnrollmentServer {
     fn set_socket_permissions() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        // Try to look up the bpfjailer group. If it doesn't exist, fall back
+        // Try to look up the icb-sandbox group. If it doesn't exist, fall back
         // to mode 0666 (world-accessible) with a warning.
         let gid = Self::lookup_group_gid(BPFJAILER_GROUP);
         match gid {
@@ -254,6 +254,9 @@ impl EnrollmentServer {
                     Err(e) => EnrollmentResponse::Error(format!("Failed to remove xattr enrollment: {}", e)),
                 }
             }
+            EnrollmentRequest::EffectivePolicy => {
+                Self::handle_effective_policy(uid, &policy_manager).await
+            }
         };
 
         let response_json = serde_json::to_string(&response)?;
@@ -264,7 +267,7 @@ impl EnrollmentServer {
         Ok(())
     }
 
-    /// Handle EnrollSelf: daemon writes caller's PID into the jailer cgroup.
+    /// Handle EnrollSelf: daemon writes caller's PID into the sandbox cgroup.
     async fn handle_enroll_self(
         pid: i32,
         uid: u32,
@@ -321,7 +324,7 @@ impl EnrollmentServer {
 
         match process_tracker.enroll_process(pid as u32, pod_id, role_id) {
             Ok(()) => EnrollmentResponse::Enrolled {
-                cgroup: format!("/bpfjailer/{}", role_name),
+                cgroup: format!("/icb-sandbox/{}", role_name),
             },
             Err(e) => EnrollmentResponse::Error(format!("enroll_process: {}", e)),
         }
@@ -358,5 +361,81 @@ impl EnrollmentServer {
             exec_enrollments,
             policy_path,
         }
+    }
+
+    async fn handle_effective_policy(
+        uid: u32,
+        policy_manager: &Arc<RwLock<PolicyManager>>,
+    ) -> EnrollmentResponse {
+        use bpfjailer_client::{AnnotatedRule, EffectiveRole};
+
+        let pm = policy_manager.read().await;
+        let mut roles = Vec::new();
+
+        for (name, role) in pm.config().roles.iter() {
+            let mut file_paths = Vec::new();
+            for p in &role.file_paths {
+                file_paths.push(AnnotatedRule {
+                    rule: format!("{} {}", if p.allow { "allow" } else { "deny" }, p.pattern),
+                    source: "base".to_string(),
+                    lockdown: p.lockdown,
+                });
+            }
+
+            if let Some(user_exts) = pm.get_user_extensions(uid) {
+                for p in user_exts {
+                    file_paths.push(AnnotatedRule {
+                        rule: format!("deny {}", p.pattern),
+                        source: "user".to_string(),
+                        lockdown: false,
+                    });
+                }
+            }
+
+            let mut ip_rules = Vec::new();
+            for r in &role.ip_rules {
+                ip_rules.push(AnnotatedRule {
+                    rule: format!("{} {} {}", if r.allow { "allow" } else { "deny" }, r.direction, r.cidr),
+                    source: "base".to_string(),
+                    lockdown: false,
+                });
+            }
+
+            let mut domain_rules = Vec::new();
+            for r in &role.domain_rules {
+                domain_rules.push(AnnotatedRule {
+                    rule: format!("{} {}", if r.allow { "allow" } else { "deny" }, r.domain),
+                    source: "base".to_string(),
+                    lockdown: false,
+                });
+            }
+
+            let flags = vec![
+                ("allow_file_access".into(), role.flags.allow_file_access),
+                ("allow_network".into(), role.flags.allow_network),
+                ("allow_exec".into(), role.flags.allow_exec),
+                ("allow_setuid".into(), role.flags.allow_setuid),
+                ("allow_ptrace".into(), role.flags.allow_ptrace),
+                ("allow_module_load".into(), role.flags.allow_module_load),
+                ("allow_bpf_load".into(), role.flags.allow_bpf_load),
+                ("require_proxy".into(), role.flags.require_proxy),
+            ];
+
+            let proxy = role.proxy.as_ref().map(|p| {
+                format!("{} (required={})", p.address, p.required)
+            });
+
+            roles.push(EffectiveRole {
+                name: name.clone(),
+                id: role.id.0,
+                flags,
+                file_paths,
+                ip_rules,
+                domain_rules,
+                proxy,
+            });
+        }
+
+        EnrollmentResponse::EffectivePolicyInfo { roles }
     }
 }

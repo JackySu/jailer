@@ -55,6 +55,8 @@ pub enum EnrollmentRequest {
     RemoveXattr {
         executable_path: String,
     },
+    /// Query effective policy for the calling user (merged base + drop-in + user extensions).
+    EffectivePolicy,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +84,28 @@ pub enum EnrollmentResponse {
         exec_enrollments: usize,
         policy_path: String,
     },
+    /// Response to EffectivePolicy — merged rules with source annotations.
+    EffectivePolicyInfo {
+        roles: Vec<EffectiveRole>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EffectiveRole {
+    pub name: String,
+    pub id: u32,
+    pub flags: Vec<(String, bool)>,
+    pub file_paths: Vec<AnnotatedRule>,
+    pub ip_rules: Vec<AnnotatedRule>,
+    pub domain_rules: Vec<AnnotatedRule>,
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnnotatedRule {
+    pub rule: String,
+    pub source: String,
+    pub lockdown: bool,
 }
 
 pub struct EnrollmentClient {

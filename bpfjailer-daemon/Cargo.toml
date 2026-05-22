@@ -1,10 +1,10 @@
 [package]
 name = "bpfjailer-daemon"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [[bin]]
-name = "bpfjailer-daemon"
+name = "icb-sandboxd"
 path = "src/main.rs"
 
 [dependencies]
@@ -15,6 +15,7 @@ libbpf-sys = "1.4"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 anyhow = { workspace = true }
 nix = { workspace = true }
 log = { workspace = true }

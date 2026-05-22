@@ -8,7 +8,7 @@ use tokio::fs;
 
 use crate::user_extensions;
 
-const DROP_IN_DIR: &str = "/etc/bpfjailer/policy.d";
+const DROP_IN_DIR: &str = "/etc/icb/sandbox/policy.d";
 
 pub struct PolicyManager {
     config: PolicyConfig,
@@ -91,9 +91,10 @@ impl PolicyManager {
         info!("Loading policy from {:?}", path_ref);
         self.loaded_path = path_ref.display().to_string();
         let content = fs::read_to_string(path_ref).await?;
-        self.config = serde_json::from_str(&content)?;
+        self.config = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("policy parse error: {}", e))?;
 
-        // Merge drop-in fragments from /etc/bpfjailer/policy.d/*.json
+        // Merge drop-in fragments from /etc/icb/sandbox/policy.d/*.toml
         self.load_drop_ins().await;
 
         self.role_map.clear();
@@ -105,7 +106,7 @@ impl PolicyManager {
         Ok(())
     }
 
-    /// Load drop-in policy fragments from /etc/bpfjailer/policy.d/*.json
+    /// Load drop-in policy fragments from /etc/icb/sandbox/policy.d/*.toml
     /// Merged in alphabetical order; later files override earlier ones.
     async fn load_drop_ins(&mut self) {
         let dir = Path::new(DROP_IN_DIR);
@@ -117,7 +118,7 @@ impl PolicyManager {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
+                .filter(|p| p.extension().map(|e| e == "toml").unwrap_or(false))
                 .collect(),
             Err(e) => {
                 log::warn!("Cannot read {}: {}", DROP_IN_DIR, e);
@@ -128,7 +129,7 @@ impl PolicyManager {
 
         for path in &entries {
             match fs::read_to_string(path).await {
-                Ok(content) => match serde_json::from_str::<PolicyConfig>(&content) {
+                Ok(content) => match toml::from_str::<PolicyConfig>(&content) {
                     Ok(fragment) => {
                         let count = fragment.roles.len();
                         for (name, role) in fragment.roles {
@@ -139,7 +140,7 @@ impl PolicyManager {
                         self.config.pods.extend(fragment.pods);
                         info!("Merged drop-in {:?} ({} roles)", path.file_name().unwrap_or_default(), count);
                     }
-                    Err(e) => log::warn!("Invalid JSON in {:?}: {}", path, e),
+                    Err(e) => log::warn!("Invalid TOML in {:?}: {}", path, e),
                 },
                 Err(e) => log::warn!("Cannot read {:?}: {}", path, e),
             }
@@ -197,7 +198,7 @@ impl PolicyManager {
         &self.loaded_path
     }
 
-    /// Load user extensions from ~/.config/bpfjailer/policy.json for all users.
+    /// Load user extensions from ~/.config/icb/sandbox/policy.toml for all users.
     /// Returns error messages for configs that failed validation.
     pub fn load_user_extensions(&mut self) -> Vec<String> {
         let (exts, errors) = user_extensions::load_all(&self.config.roles);
@@ -231,5 +232,21 @@ impl PolicyManager {
 
     pub fn extensions_count(&self) -> usize {
         self.extensions.len()
+    }
+
+    pub fn all_extensions(&self) -> &HashMap<u32, Vec<PathPattern>> {
+        &self.extensions
+    }
+
+    /// Get effective file_paths for a role, merging ALL user extensions (all uids).
+    pub fn effective_file_paths_all(&self, role_id: RoleId) -> Vec<PathPattern> {
+        let mut paths = match self.role_map.get(&role_id) {
+            Some(role) => role.file_paths.clone(),
+            None => return Vec::new(),
+        };
+        for exts in self.extensions.values() {
+            paths.extend(exts.iter().cloned());
+        }
+        paths
     }
 }

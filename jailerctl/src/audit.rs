@@ -6,7 +6,7 @@ pub fn run(me: bool, since: Option<&str>, role: Option<&str>, follow: bool) -> R
         "--output".to_string(),
         "short-precise".to_string(),
         "-t".to_string(),
-        "bpfjailer-audit".to_string(),
+        "icb-sandbox-audit".to_string(),
     ];
 
     if follow {
