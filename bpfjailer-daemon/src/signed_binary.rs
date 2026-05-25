@@ -1,7 +1,9 @@
+#![allow(dead_code)]
+
+use crate::bpf_loader::BpfJailerBpf;
 use anyhow::Result;
 use log::info;
 use std::sync::Arc;
-use crate::bpf_loader::BpfJailerBpf;
 
 pub struct SignedBinaryManager {
     _bpf: Arc<BpfJailerBpf>,

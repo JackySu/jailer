@@ -48,7 +48,9 @@ struct RateLimiter {
 
 impl RateLimiter {
     fn new() -> Self {
-        Self { buckets: HashMap::new() }
+        Self {
+            buckets: HashMap::new(),
+        }
     }
 
     /// Returns true if the event should be emitted (not rate-limited).
@@ -67,7 +69,8 @@ impl RateLimiter {
     /// Periodic cleanup of expired entries to prevent unbounded growth.
     fn gc(&mut self) {
         let now = Instant::now();
-        self.buckets.retain(|_, (_, t)| now.duration_since(*t) < RATE_LIMIT_WINDOW);
+        self.buckets
+            .retain(|_, (_, t)| now.duration_since(*t) < RATE_LIMIT_WINDOW);
     }
 }
 
@@ -96,9 +99,8 @@ fn run_audit_loop(bpf: &BpfJailerBpf) -> anyhow::Result<()> {
             if data.len() < std::mem::size_of::<AuditEvent>() {
                 return;
             }
-            let event: AuditEvent = unsafe {
-                std::ptr::read_unaligned(data.as_ptr() as *const AuditEvent)
-            };
+            let event: AuditEvent =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const AuditEvent) };
 
             if !limiter.allow(event.role_id, event.hook_type, event.context) {
                 return;
@@ -118,7 +120,7 @@ fn run_audit_loop(bpf: &BpfJailerBpf) -> anyhow::Result<()> {
             );
 
             gc_counter += 1;
-            if gc_counter % 1000 == 0 {
+            if gc_counter.is_multiple_of(1000) {
                 limiter.gc();
             }
         },

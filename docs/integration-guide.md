@@ -13,8 +13,8 @@ icb-sandbox 在操作系统层面拦截 syscall，即使 agent 被 prompt inject
 通过 AppImage 一键安装（包含 icb-agent + sandbox 全套组件）：
 
 ```bash
-chmod +x icb-sandbox-*.AppImage
-sudo ./icb-sandbox-*.AppImage install
+chmod +x icb-installer-*.AppImage
+sudo ./icb-installer-*.AppImage install
 ```
 
 安装过程会：
@@ -156,16 +156,16 @@ icb-sandbox-ctl effective-policy
 
 ```bash
 # 检查版本
-./icb-sandbox-*.AppImage status
+./icb-installer-*.AppImage status
 
 # 升级（保留现有 policy.toml）
-sudo ./icb-sandbox-*.AppImage upgrade
+sudo ./icb-installer-*.AppImage upgrade
 
 # 卸载（保留配置）
-sudo ./icb-sandbox-*.AppImage uninstall
+sudo ./icb-installer-*.AppImage uninstall
 
 # 卸载（清除所有配置）
-sudo ./icb-sandbox-*.AppImage uninstall --purge
+sudo ./icb-installer-*.AppImage uninstall --purge
 ```
 
 ## 常见问题

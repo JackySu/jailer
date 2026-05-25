@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bpfjailer_common::{PathPattern, PolicyConfig, PolicyFlags, PodId, Role, RoleId};
+use bpfjailer_common::{PathPattern, PodId, PolicyConfig, PolicyFlags, Role, RoleId};
 use log::info;
 use std::collections::HashMap;
 use std::path::Path;
@@ -71,8 +71,12 @@ impl PolicyManager {
             proxy: None,
         };
 
-        config.roles.insert("restricted".to_string(), restricted_role.clone());
-        config.roles.insert("permissive".to_string(), permissive_role.clone());
+        config
+            .roles
+            .insert("restricted".to_string(), restricted_role.clone());
+        config
+            .roles
+            .insert("permissive".to_string(), permissive_role.clone());
         role_map.insert(RoleId(1), Arc::new(restricted_role));
         role_map.insert(RoleId(2), Arc::new(permissive_role));
 
@@ -91,14 +95,14 @@ impl PolicyManager {
         info!("Loading policy from {:?}", path_ref);
         self.loaded_path = path_ref.display().to_string();
         let content = fs::read_to_string(path_ref).await?;
-        self.config = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("policy parse error: {}", e))?;
+        self.config =
+            toml::from_str(&content).map_err(|e| anyhow::anyhow!("policy parse error: {}", e))?;
 
         // Merge drop-in fragments from /etc/icb/sandbox/policy.d/*.toml
         self.load_drop_ins().await;
 
         self.role_map.clear();
-        for (_name, role) in &self.config.roles {
+        for role in self.config.roles.values() {
             self.role_map.insert(role.id, Arc::new(role.clone()));
         }
 
@@ -135,10 +139,18 @@ impl PolicyManager {
                         for (name, role) in fragment.roles {
                             self.config.roles.insert(name, role);
                         }
-                        self.config.exec_enrollments.extend(fragment.exec_enrollments);
-                        self.config.cgroup_enrollments.extend(fragment.cgroup_enrollments);
+                        self.config
+                            .exec_enrollments
+                            .extend(fragment.exec_enrollments);
+                        self.config
+                            .cgroup_enrollments
+                            .extend(fragment.cgroup_enrollments);
                         self.config.pods.extend(fragment.pods);
-                        info!("Merged drop-in {:?} ({} roles)", path.file_name().unwrap_or_default(), count);
+                        info!(
+                            "Merged drop-in {:?} ({} roles)",
+                            path.file_name().unwrap_or_default(),
+                            count
+                        );
                     }
                     Err(e) => log::warn!("Invalid TOML in {:?}: {}", path, e),
                 },
@@ -153,9 +165,9 @@ impl PolicyManager {
 
     #[allow(dead_code)]
     pub fn get_role_by_name(&self, name: &str) -> Option<&Arc<Role>> {
-        self.config.get_role(name).map(|r| {
-            self.role_map.get(&r.id).unwrap()
-        })
+        self.config
+            .get_role(name)
+            .map(|r| self.role_map.get(&r.id).unwrap())
     }
 
     pub fn config(&self) -> &PolicyConfig {
@@ -164,9 +176,12 @@ impl PolicyManager {
 
     /// Get executable enrollments from policy
     pub fn get_exec_enrollments(&self) -> Vec<(String, PodId, RoleId)> {
-        self.config.exec_enrollments.iter()
+        self.config
+            .exec_enrollments
+            .iter()
             .filter_map(|e| {
-                self.config.get_role(&e.role)
+                self.config
+                    .get_role(&e.role)
                     .map(|r| (e.executable_path.clone(), PodId(e.pod_id), r.id))
             })
             .collect()
@@ -174,9 +189,12 @@ impl PolicyManager {
 
     /// Get cgroup enrollments from policy
     pub fn get_cgroup_enrollments(&self) -> Vec<(String, PodId, RoleId)> {
-        self.config.cgroup_enrollments.iter()
+        self.config
+            .cgroup_enrollments
+            .iter()
             .filter_map(|e| {
-                self.config.get_role(&e.role)
+                self.config
+                    .get_role(&e.role)
                     .map(|r| (e.cgroup_path.clone(), PodId(e.pod_id), r.id))
             })
             .collect()

@@ -1,6 +1,6 @@
+use crate::types::{PolicyFlags, RoleId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types::{RoleId, PolicyFlags};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathPattern {
@@ -124,6 +124,12 @@ pub struct UserExtensionConfig {
     pub user_extensions: Vec<PathPattern>,
 }
 
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PolicyConfig {
     pub fn new() -> Self {
         Self {
@@ -151,7 +157,11 @@ impl PolicyConfig {
 pub struct SecretPatterns;
 
 fn deny(pattern: &str) -> PathPattern {
-    PathPattern { pattern: pattern.to_string(), allow: false, lockdown: false }
+    PathPattern {
+        pattern: pattern.to_string(),
+        allow: false,
+        lockdown: false,
+    }
 }
 
 impl SecretPatterns {
@@ -205,23 +215,31 @@ pub struct AllowedDomains;
 impl AllowedDomains {
     /// OpenAI API endpoints
     pub fn openai() -> Vec<DomainRule> {
-        vec![
-            DomainRule { domain: "api.openai.com".to_string(), allow: true },
-        ]
+        vec![DomainRule {
+            domain: "api.openai.com".to_string(),
+            allow: true,
+        }]
     }
 
     /// Anthropic API endpoints
     pub fn anthropic() -> Vec<DomainRule> {
-        vec![
-            DomainRule { domain: "api.anthropic.com".to_string(), allow: true },
-        ]
+        vec![DomainRule {
+            domain: "api.anthropic.com".to_string(),
+            allow: true,
+        }]
     }
 
     /// Google AI endpoints
     pub fn google_ai() -> Vec<DomainRule> {
         vec![
-            DomainRule { domain: "generativelanguage.googleapis.com".to_string(), allow: true },
-            DomainRule { domain: "aiplatform.googleapis.com".to_string(), allow: true },
+            DomainRule {
+                domain: "generativelanguage.googleapis.com".to_string(),
+                allow: true,
+            },
+            DomainRule {
+                domain: "aiplatform.googleapis.com".to_string(),
+                allow: true,
+            },
         ]
     }
 
@@ -231,8 +249,14 @@ impl AllowedDomains {
         rules.extend(Self::openai());
         rules.extend(Self::anthropic());
         rules.extend(Self::google_ai());
-        rules.push(DomainRule { domain: "api.cohere.ai".to_string(), allow: true });
-        rules.push(DomainRule { domain: "api.mistral.ai".to_string(), allow: true });
+        rules.push(DomainRule {
+            domain: "api.cohere.ai".to_string(),
+            allow: true,
+        });
+        rules.push(DomainRule {
+            domain: "api.mistral.ai".to_string(),
+            allow: true,
+        });
         rules
     }
 }

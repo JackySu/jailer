@@ -10,21 +10,25 @@ struct Check {
 }
 
 pub fn run() -> Result<()> {
-    let mut checks: Vec<Check> = Vec::new();
-
-    checks.push(check_kernel_version());
-    checks.push(check_bpf_lsm_enabled());
-    checks.push(check_bpf_lsm_boot_param());
-    checks.push(check_btf_available());
-    checks.push(check_cgroup_v2());
-    checks.push(check_daemon_running());
-    checks.push(check_disabled_sentinel());
+    let checks: Vec<Check> = vec![
+        check_kernel_version(),
+        check_bpf_lsm_enabled(),
+        check_bpf_lsm_boot_param(),
+        check_btf_available(),
+        check_cgroup_v2(),
+        check_daemon_running(),
+        check_disabled_sentinel(),
+    ];
 
     println!("icb-sandbox-ctl doctor — system readiness check\n");
 
     let mut all_pass = true;
     for c in &checks {
-        let icon = if c.pass { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+        let icon = if c.pass {
+            "\x1b[32m✓\x1b[0m"
+        } else {
+            "\x1b[31m✗\x1b[0m"
+        };
         println!("  {} {}: {}", icon, c.name, c.detail);
         if !c.pass {
             all_pass = false;
@@ -35,7 +39,9 @@ pub fn run() -> Result<()> {
     if all_pass {
         println!("\x1b[32mAll checks passed.\x1b[0m Ready to run icb-sandbox.");
     } else {
-        println!("\x1b[31mSome checks failed.\x1b[0m Fix the issues above before running icb-sandbox.");
+        println!(
+            "\x1b[31mSome checks failed.\x1b[0m Fix the issues above before running icb-sandbox."
+        );
         bail!("doctor failed");
     }
     Ok(())
@@ -100,18 +106,34 @@ fn check_bpf_lsm_boot_param() -> Check {
     let name = "Boot param lsm=bpf";
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let has_lsm_bpf = cmdline.split_whitespace().any(|arg| {
-        arg.starts_with("lsm=") && arg.split('=').nth(1).map_or(false, |v| v.split(',').any(|s| s == "bpf"))
+        arg.starts_with("lsm=")
+            && arg
+                .split('=')
+                .nth(1)
+                .is_some_and(|v| v.split(',').any(|s| s == "bpf"))
     });
     if has_lsm_bpf {
-        Check { name, pass: true, detail: "lsm= includes bpf".into() }
+        Check {
+            name,
+            pass: true,
+            detail: "lsm= includes bpf".into(),
+        }
     } else {
         let lsm_active = fs::read_to_string("/sys/kernel/security/lsm")
             .map(|s| s.contains("bpf"))
             .unwrap_or(false);
         if lsm_active {
-            Check { name, pass: true, detail: "bpf LSM active (built-in or default)".into() }
+            Check {
+                name,
+                pass: true,
+                detail: "bpf LSM active (built-in or default)".into(),
+            }
         } else {
-            Check { name, pass: false, detail: "lsm= does not include bpf in /proc/cmdline".into() }
+            Check {
+                name,
+                pass: false,
+                detail: "lsm= does not include bpf in /proc/cmdline".into(),
+            }
         }
     }
 }
@@ -133,7 +155,9 @@ fn check_btf_available() -> Check {
 fn check_cgroup_v2() -> Check {
     let name = "cgroup v2 unified";
     let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    let has_cgroup2 = mounts.lines().any(|l| l.contains("cgroup2") && l.contains("/sys/fs/cgroup"));
+    let has_cgroup2 = mounts
+        .lines()
+        .any(|l| l.contains("cgroup2") && l.contains("/sys/fs/cgroup"));
     Check {
         name,
         pass: has_cgroup2,
@@ -162,11 +186,21 @@ fn check_daemon_running() -> Check {
             .map(|o| o.status.success())
             .unwrap_or(false);
         let detail = if via_systemd {
-            format!("pid={} (systemd, logs: journalctl -u icb-sandboxd)", pid_trimmed)
+            format!(
+                "pid={} (systemd, logs: journalctl -u icb-sandboxd)",
+                pid_trimmed
+            )
         } else {
-            format!("pid={} (manual, logs: stderr or /tmp/icb-sandboxd.log)", pid_trimmed)
+            format!(
+                "pid={} (manual, logs: stderr or /tmp/icb-sandboxd.log)",
+                pid_trimmed
+            )
         };
-        Check { name, pass: true, detail }
+        Check {
+            name,
+            pass: true,
+            detail,
+        }
     } else {
         Check {
             name,

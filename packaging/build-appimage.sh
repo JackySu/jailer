@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="$PROJECT_ROOT/packaging/out"
-APP_DIR="$OUT_DIR/icb-sandbox.AppDir"
+APP_DIR="$OUT_DIR/icb-installer.AppDir"
 VERSION=$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
 ARCH="x86_64"
 
@@ -58,17 +58,17 @@ cp "$SCRIPT_DIR/AppRun" "$APP_DIR/AppRun"
 chmod +x "$APP_DIR/AppRun"
 
 # .desktop file (required by AppImage spec)
-cat >"$APP_DIR/icb-sandbox.desktop" <<'DESKTOP'
+cat >"$APP_DIR/icb-installer.desktop" <<'DESKTOP'
 [Desktop Entry]
-Name=icb-sandbox
+Name=icb-installer
 Exec=AppRun
-Icon=icb-sandbox
+Icon=icb-installer
 Type=Application
 Categories=System;Security;
 DESKTOP
 
 # Minimal icon (1x1 PNG placeholder)
-printf '\x89PNG\r\n\x1a\n' >"$APP_DIR/icb-sandbox.png"
+printf '\x89PNG\r\n\x1a\n' >"$APP_DIR/icb-installer.png"
 
 # Download appimagetool if not present
 APPIMAGETOOL="$OUT_DIR/appimagetool"
@@ -81,6 +81,6 @@ fi
 
 # Build AppImage
 export ARCH
-"$APPIMAGETOOL" "$APP_DIR" "$OUT_DIR/icb-sandbox-${VERSION}-${ARCH}.AppImage"
+"$APPIMAGETOOL" "$APP_DIR" "$OUT_DIR/icb-installer-${VERSION}-${ARCH}.AppImage"
 
-echo "=== Done: $OUT_DIR/icb-sandbox-${VERSION}-${ARCH}.AppImage ==="
+echo "=== Done: $OUT_DIR/icb-installer-${VERSION}-${ARCH}.AppImage ==="
